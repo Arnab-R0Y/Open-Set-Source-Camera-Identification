@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 from extract_PRNU import extract_multiple_aligned
+from extract_PRNU import extract_patches
 import multiprocessing
 import time
 
@@ -26,6 +27,10 @@ if __name__ == "__main__":
 
         OUTPUT_IMAGE_PATH = os.path.join(OUTPUT_DIR, f'{CAMERA_FOLDER}_fingerprint.png')
         OUTPUT_NUMPY_PATH = os.path.join(OUTPUT_DIR, f'{CAMERA_FOLDER}_fingerprint.npy')
+        if os.path.exists(OUTPUT_NUMPY_PATH):
+            print(f"✅ Fingerprint already exists for {CAMERA_FOLDER}, skipping...")
+            continue
+
 
         # Read image paths
         image_paths = [os.path.join(CAMERA_PATH, f) for f in os.listdir(CAMERA_PATH)
@@ -55,13 +60,23 @@ if __name__ == "__main__":
                         print(f"Could not read image: {path}")
                         continue
                     
-                    # Resize to 512x512
-                    im = cv2.resize(im, (512, 512), interpolation=cv2.INTER_AREA)
-
                     im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-                    images.append(im)
+
+                    patches = extract_patches(im, patch_size=512, stride=512)
+
+                    if not patches:
+                        print(f"No patches extracted from {path}")
+                        continue
+
+                    images.extend(patches)
+            
+
+
+                    # im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                    # images.append(im)
                 except Exception as e:
                     print(f"Failed to load {path}: {e}")
+            print(f"  ↳ Extracted {len(patches)} patches from {path}")
 
             if not images:
                 print(f"Skipping batch {i}–{i + BATCH_SIZE}: No valid images")
@@ -69,7 +84,7 @@ if __name__ == "__main__":
 
             print(f"🛠️  Extracting PRNU for batch {i}–{i + len(images)}")
 
-            prnu = extract_multiple_aligned(images, levels=4, sigma=5, processes=4)
+            prnu = extract_multiple_aligned(images, levels=15, sigma=15, processes=4)
             
             if all_fingerprints and prnu.shape != all_fingerprints[0].shape:
                 print(f"Skipping PRNU from batch {i}–{i + len(images)} due to shape mismatch: {prnu.shape}")

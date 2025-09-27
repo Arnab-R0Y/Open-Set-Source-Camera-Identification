@@ -26,7 +26,7 @@ class ArgumentError(Exception):
 
 
 # Performs the noise extraction operation via the DRUNET network.
-def noise_extract_drunet(im: np.ndarray, levels: int = 4, sigma: int = 5) -> np.ndarray:
+def noise_extract_drunet(im: np.ndarray, levels: int = 15, sigma: int = 15) -> np.ndarray:
     """
         Extract noise residual from a single image
         :param im: grayscale or color image, np.uint8
@@ -34,6 +34,10 @@ def noise_extract_drunet(im: np.ndarray, levels: int = 4, sigma: int = 5) -> np.
         :param sigma: estimated noise power (try: 15, 50, 100)
         :return: noise residual
     """
+
+    assert im.dtype == np.uint8, f"Input image must be uint8, got {im.dtype}"
+    assert im.ndim == 3, f"Input image must be 3D (H,W,C), got {im.ndim}D"
+    assert im.shape[2] == 3, f"Input image must have 3 channels, got {im.shape[2]}"
 
     # ----------------------------------------
     # Preparation
@@ -74,9 +78,8 @@ def noise_extract_drunet(im: np.ndarray, levels: int = 4, sigma: int = 5) -> np.
 
     img_H = im
     img_L = util.uint2single(img_H)
-
-    # Add noise without clipping
-    np.random.seed(seed=0)  # for reproducibility
+    img_hash = hash(img_H.tobytes()) % (2**32)
+    np.random.seed(seed=img_hash)
     img_L += np.random.normal(0, noise_level_img / 255., img_L.shape)
 
     img_L = util.single2tensor4(img_L)
@@ -634,6 +637,25 @@ def gt(l1: Union[list, np.ndarray], l2: Union[list, np.ndarray]) -> np.ndarray:
         gt_arr[l1idx, l2 == l1sample] = True
 
     return gt_arr
+
+
+def extract_patches(image: np.ndarray, patch_size: int = 512, stride: int = 512) -> list:
+    """
+    Extracts non-overlapping or overlapping patches from an RGB image.
+    :param image: RGB np.uint8 image of shape (H, W, 3)
+    :param patch_size: Size of square patch (default 512)
+    :param stride: Stride between patches (default 512 = non-overlapping)
+    :return: list of RGB patches (np.uint8)
+    """
+    h, w, _ = image.shape
+    patches = []
+    for y in range(0, h - patch_size + 1, stride):
+        for x in range(0, w - patch_size + 1, stride):
+            patch = image[y:y + patch_size, x:x + patch_size]
+            patches.append(patch)
+    return patches
+
+
 
 
 
