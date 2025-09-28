@@ -9,7 +9,6 @@ import cv2
 # === INPUT: paths to fingerprint directories ===
 fingerprints_dir_old = r'X:\Projects\Open set source camera identification\Fingerprints'
 fingerprints_dir_new = r'X:\Projects\Open set source camera identification\Fingerprints_Laptop'
-fingerprints_dir_optimized = r'X:\Projects\Open set source camera identification\Fingerprints_Optimized'
 
 # === Load the PRNU fingerprint arrays ===
 def load_fingerprint(path):
@@ -27,62 +26,62 @@ def resize_to_match(f1, f2):
 
 # === Advanced PRNU comparison functions ===
 def zero_mean_total(im):
-    """Zero mean normalization for PRNU fingerprints"""
-    im[0::2, 0::2] = zero_mean(im[0::2, 0::2])
-    im[1::2, 0::2] = zero_mean(im[1::2, 0::2])
-    im[0::2, 1::2] = zero_mean(im[0::2, 1::2])
-    im[1::2, 1::2] = zero_mean(im[1::2, 1::2])
-    return im
+    """Simplified global zero-mean normalization for PRNU fingerprints."""
+    return im - im.mean()
 
 def zero_mean(im):
-    """Zero mean normalization"""
-    if im.ndim == 2:
-        im.shape += (1,)
-    h, w, ch = im.shape
-    ch_mean = im.mean(axis=0).mean(axis=0)
-    ch_mean.shape = (1, 1, ch)
-    i_zm = im - ch_mean
-    row_mean = i_zm.mean(axis=1)
-    col_mean = i_zm.mean(axis=0)
-    row_mean.shape = (h, 1, ch)
-    col_mean.shape = (1, w, ch)
-    i_zm_r = i_zm - row_mean
-    i_zm_rc = i_zm_r - col_mean
-    if im.shape[2] == 1:
-        i_zm_rc.shape = im.shape[:2]
-    return i_zm_rc
+    """Simplified zero-mean normalization for 2D/3D arrays."""
+    return im - im.mean()
 
 def crosscorr_2d(k1, k2):
-    """2D cross-correlation for PRNU comparison"""
+    """2D cross-correlation with mean removal and FFT-friendly padding."""
     assert k1.ndim == 2
     assert k2.ndim == 2
     
+    # Mean removal
+    k1 = k1 - k1.mean()
+    k2 = k2 - k2.mean()
+    
+    # Target size: max dims
     max_height = max(k1.shape[0], k2.shape[0])
     max_width = max(k1.shape[1], k2.shape[1])
     
-    k1 -= k1.flatten().mean()
-    k2 -= k2.flatten().mean()
+    # Use next power of two for efficiency
+    fft_h = 1 << int(np.ceil(np.log2(max_height)))
+    fft_w = 1 << int(np.ceil(np.log2(max_width)))
     
-    k1 = np.pad(k1, [(0, max_height - k1.shape[0]), (0, max_width - k1.shape[1])], mode='constant', constant_values=0)
-    k2 = np.pad(k2, [(0, max_height - k2.shape[0]), (0, max_width - k2.shape[1])], mode='constant', constant_values=0)
+    k1_pad = np.zeros((fft_h, fft_w), dtype=k1.dtype)
+    k2_pad = np.zeros((fft_h, fft_w), dtype=k2.dtype)
+    k1_pad[:k1.shape[0], :k1.shape[1]] = k1
+    k2_pad[:k2.shape[0], :k2.shape[1]] = k2
     
-    k1_fft = fft2(k1)
-    k2_fft = fft2(np.rot90(k2, 2))
+    k1_fft = fft2(k1_pad)
+    k2_fft = fft2(np.rot90(k2_pad, 2))
+    cc = np.real(ifft2(k1_fft * k2_fft))
     
-    return np.real(ifft2(k1_fft * k2_fft)).astype(np.float32)
+    # Crop back to analysis size
+    cc = cc[:max_height, :max_width]
+    return cc.astype(np.float32)
 
 def pce(cc, neigh_radius=2):
-    """Peak-to-Correlation Energy calculation"""
+    """Peak-to-Correlation Energy with safe masking near edges."""
     assert cc.ndim == 2
     assert isinstance(neigh_radius, int)
     
-    max_idx = np.argmax(cc.flatten())
+    max_idx = np.argmax(cc.ravel())
     max_y, max_x = np.unravel_index(max_idx, cc.shape)
     peak_height = cc[max_y, max_x]
     
     cc_nopeaks = cc.copy()
-    cc_nopeaks[max_y - neigh_radius:max_y + neigh_radius, max_x - neigh_radius:max_x + neigh_radius] = 0
-    pce_energy = np.mean(cc_nopeaks.flatten() ** 2)
+    y_min = max(0, max_y - neigh_radius)
+    y_max = min(cc.shape[0], max_y + neigh_radius + 1)
+    x_min = max(0, max_x - neigh_radius)
+    x_max = min(cc.shape[1], max_x + neigh_radius + 1)
+    cc_nopeaks[y_min:y_max, x_min:x_max] = 0
+    
+    pce_energy = np.mean(cc_nopeaks.ravel() ** 2)
+    if pce_energy == 0:
+        pce_energy = 1e-10
     
     pce_value = (peak_height ** 2) / pce_energy * np.sign(peak_height)
     return pce_value, peak_height
@@ -125,10 +124,14 @@ def compute_similarity_enhanced(f1, f2):
     return pce_value, peak_height, ncc, ssim_value
 
 def compute_similarity(f1, f2):
-    """Legacy similarity computation (kept for comparison)"""
+    """Legacy similarity computation with constant-input guard."""
     flat1 = f1.flatten()
     flat2 = f2.flatten()
+    if np.std(flat1) == 0 or np.std(flat2) == 0:
+        return 0.0
     corr, _ = pearsonr(flat1, flat2)
+    if np.isnan(corr):
+        return 0.0
     return corr
 
 # === Enhanced comparison function ===
@@ -252,12 +255,6 @@ if __name__ == "__main__":
     else:
         print(f"Laptop fingerprints directory not found: {fingerprints_dir_new}")
     
-    # Compare optimized fingerprints (if they exist)
-    if os.path.exists(fingerprints_dir_optimized):
-        compare_different_cameras_enhanced(fingerprints_dir_optimized, "OPTIMIZED Fingerprints")
-    else:
-        print(f"Optimized fingerprints directory not found: {fingerprints_dir_optimized}")
-        print("Run: python extractionMain_optimized.py to generate optimized fingerprints")
     
     print("\n" + "=" * 60)
     print("🎯 ENHANCED COMPARISON COMPLETE!")
