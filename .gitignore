@@ -206,7 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-#Dataset
+#From my local setup
 Images/
 Images_backup/
 Model Path/
@@ -214,3 +214,4 @@ output_images/
 Fingerprints/
 Fingerprints_Laptop/
 Temp/
+combined_outputs/

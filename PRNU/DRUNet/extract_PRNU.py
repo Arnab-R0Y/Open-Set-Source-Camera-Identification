@@ -662,24 +662,158 @@ def extract_patches(image: np.ndarray, patch_size: int = 512, stride: int = 512)
 if __name__ == "__main__":
     import cv2
     import os
+    import time
+    from tqdm import tqdm
+    import multiprocessing
 
-    # Path to input image
-    input_path = r"X:\Projects\Open-set camera identification\Test Model\Test images\Apple.jpeg"
+    multiprocessing.freeze_support()
 
-    # Read the image
-    im = cv2.imread(input_path)  # BGR format
-    im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)  # Convert to RGB
+    # ---------- USER CONFIG ----------
+    INPUT_IMAGE = r"X:\Projects\Open set source camera identification\Images\Known Cameras\Agfa_DC-504_0\Agfa_DC-504_0_1.JPG"
+    OUTPUT_DIR = "output_images"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Extract noise / PRNU
-    prnu = extract_single(im, levels=100, sigma=100)
+    PATCH_SIZE = 512
+    STRIDE = 512
+    MAX_PATCHES = 200            # limit patches for laptop safety (tune)
+    PATCH_BATCH_SIZE = 10        # used only in averaging mode
+    PROCESSES = 4                # for extract_multiple_aligned when averaging
+    LEVELS = 15
+    SIGMA = 15
 
-    # Normalize output for saving as an image
-    prnu_norm = cv2.normalize(prnu, None, 0, 255, cv2.NORM_MINMAX)
-    prnu_norm = prnu_norm.astype(np.uint8)
+    # If True -> per-patch extraction and reconstruct full image by stitching patch PRNUs back
+    # If False -> use batch-averaging (faster but returns a single patch-sized fingerprint averaged across patches)
+    RECONSTRUCT_FULL = True
+    # ---------------------------------
 
-    # Save output
-    os.makedirs("output_images", exist_ok=True)
-    output_path = os.path.join("output_images", "my_image_prnu.png")
-    cv2.imwrite(output_path, prnu_norm)
+    start_time = time.time()
 
-    print(f"PRNU/noise residual saved at: {output_path}")
+    if not os.path.exists(INPUT_IMAGE):
+        raise FileNotFoundError(f"Input not found: {INPUT_IMAGE}")
+
+    print(f"Loading {INPUT_IMAGE}")
+    img_bgr = cv2.imread(INPUT_IMAGE)
+    if img_bgr is None:
+        raise IOError("cv2.imread failed to load image")
+    img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    H, W, C = img.shape
+    print(f"Image shape: {H}x{W}x{C}")
+
+    # Helper: extract patches with coordinates (y, x)
+    def extract_patches_with_coords(image: np.ndarray, patch_size: int = 512, stride: int = 512):
+        h, w, _ = image.shape
+        patches = []
+        for y in range(0, h - patch_size + 1, stride):
+            for x in range(0, w - patch_size + 1, stride):
+                p = image[y:y + patch_size, x:x + patch_size].copy()
+                patches.append((p, (y, x)))
+        # handle right and bottom borders if not divisible
+        if (w - patch_size) % stride != 0 or (h - patch_size) % stride != 0:
+            # right border columns
+            for y in range(0, h - patch_size + 1, stride):
+                x = max(0, w - patch_size)
+                p = image[y:y + patch_size, x:x + patch_size].copy()
+                patches.append((p, (y, x)))
+            # bottom border rows
+            for x in range(0, w - patch_size + 1, stride):
+                y = max(0, h - patch_size)
+                p = image[y:y + patch_size, x:x + patch_size].copy()
+                patches.append((p, (y, x)))
+            # bottom-right corner
+            y = max(0, h - patch_size)
+            x = max(0, w - patch_size)
+            p = image[y:y + patch_size, x:x + patch_size].copy()
+            patches.append((p, (y, x)))
+        return patches
+
+    # collect patches
+    print("Extracting patches (with coords)...")
+    patches_with_coords = extract_patches_with_coords(img, PATCH_SIZE, STRIDE)
+    if not patches_with_coords:
+        print("No patches extracted. Exiting.")
+        exit(1)
+
+    # limit patches for laptop if requested
+    if len(patches_with_coords) > MAX_PATCHES:
+        print(f"Collected {len(patches_with_coords)} patches. Limiting to first {MAX_PATCHES}.")
+        patches_with_coords = patches_with_coords[:MAX_PATCHES]
+
+    print(f"Patches to process: {len(patches_with_coords)}")
+
+    if RECONSTRUCT_FULL:
+        # Per-patch extraction and reconstruction
+        print("MODE: Reconstruct full-size PRNU by stitching per-patch PRNUs")
+        canvas = np.zeros((H, W), dtype=np.float32)
+        weight = np.zeros((H, W), dtype=np.float32)
+
+        # We will compute PRNU for each patch individually (extract_single)
+        # This can be slow because DRUNET may load per call. You can parallelize if you have worker setup.
+        for (patch, (y, x)) in tqdm(patches_with_coords, desc="Processing patches (reconstruct)"):
+            try:
+                # extract_single expects RGB uint8 patch
+                prnu_patch = extract_single(patch, levels=LEVELS, sigma=SIGMA)
+                # ensure it's 2D and same shape as patch (H_patch, W_patch)
+                if prnu_patch.ndim == 3 and prnu_patch.shape[2] == 1:
+                    prnu_patch = prnu_patch[:, :, 0]
+                ph, pw = prnu_patch.shape
+                # Restrict to canvas bounds (safety)
+                y_end = min(H, y + ph)
+                x_end = min(W, x + pw)
+                ph_eff = y_end - y
+                pw_eff = x_end - x
+                canvas[y:y_end, x:x_end] += prnu_patch[:ph_eff, :pw_eff]
+                weight[y:y_end, x:x_end] += 1.0
+            except Exception as e:
+                tqdm.write(f"Failed patch at ({y},{x}): {e}")
+                continue
+
+        # avoid divide by zero
+        weight_safe = np.where(weight == 0, 1.0, weight)
+        final_prnu_full = canvas / weight_safe
+
+        # normalize and save
+        prnu_norm = cv2.normalize(final_prnu_full, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        out_png = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(INPUT_IMAGE))[0] + "_prnu_recon.png")
+        out_npy = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(INPUT_IMAGE))[0] + "_prnu_recon.npy")
+        cv2.imwrite(out_png, prnu_norm)
+        np.save(out_npy, final_prnu_full)
+        print(f"Saved reconstructed PRNU image to: {out_png}")
+        print(f"Saved reconstructed PRNU array to: {out_npy}")
+
+    else:
+        # Averaging mode: batch patches and use extract_multiple_aligned like your multi-image script
+        print("MODE: Averaging PRNUs (faster) — final fingerprint will be patch-sized (average across patches).")
+        patches_only = [p for (p, _) in patches_with_coords]
+        all_batch_prnus = []
+        total_batches = (len(patches_only) - 1) // PATCH_BATCH_SIZE + 1
+        for bstart in range(0, len(patches_only), PATCH_BATCH_SIZE):
+            bend = min(bstart + PATCH_BATCH_SIZE, len(patches_only))
+            batch = patches_only[bstart:bend]
+            print(f"Processing batch {bstart//PATCH_BATCH_SIZE + 1}/{total_batches} (patches {bstart+1}-{bend})")
+            try:
+                # extract_multiple_aligned will aggregate PRNU across the batch (returns patch-sized fingerprint)
+                batch_prnu = extract_multiple_aligned(batch, levels=LEVELS, sigma=SIGMA, processes=PROCESSES)
+                if batch_prnu is None:
+                    print("Batch returned None, skipping.")
+                    continue
+                all_batch_prnus.append(batch_prnu)
+            except Exception as e:
+                print(f"Batch failed: {e}")
+                continue
+
+        if not all_batch_prnus:
+            print("No batch PRNUs computed. Exiting.")
+            exit(1)
+
+        final_prnu_patch = np.mean(all_batch_prnus, axis=0)  # patch-sized fingerprint (H_patch, W_patch)
+        prnu_norm = cv2.normalize(final_prnu_patch, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        out_png = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(INPUT_IMAGE))[0] + "_prnu_avg.png")
+        out_npy = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(INPUT_IMAGE))[0] + "_prnu_avg.npy")
+        cv2.imwrite(out_png, prnu_norm)
+        np.save(out_npy, final_prnu_patch)
+        print(f"Saved averaged patch-sized PRNU image to: {out_png}")
+        print(f"Saved averaged PRNU array to: {out_npy}")
+
+    end_time = time.time()
+    print(f"Done. Elapsed: {end_time - start_time:.2f} seconds")
+
